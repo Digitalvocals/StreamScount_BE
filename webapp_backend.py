@@ -60,33 +60,27 @@ WEIGHT_ENGAGEMENT = 0.20
 # ============================================================================
 
 _cache = {
-    "data": {},  # Changed to dict to store multiple limits
+    "data": None,
+    "timestamp": 0,
     "expires_in": 900  # 15 minutes
 }
 
-def get_cached_data(limit):
-    """Get cached analysis if still valid for this limit"""
-    cache_key = f"limit_{limit}"
-    
-    if cache_key not in _cache["data"]:
+def get_cached_data():
+    """Get cached analysis if still valid"""
+    if _cache["data"] is None:
         return None
     
-    cached = _cache["data"][cache_key]
-    age = time.time() - cached["timestamp"]
-    
+    age = time.time() - _cache["timestamp"]
     if age > _cache["expires_in"]:
         return None
     
-    cached["response"]["cache_expires_in_seconds"] = int(_cache["expires_in"] - age)
-    return cached["response"]
+    _cache["data"]["cache_expires_in_seconds"] = int(_cache["expires_in"] - age)
+    return _cache["data"]
 
-def set_cached_data(limit, data):
-    """Cache the analysis results for this limit"""
-    cache_key = f"limit_{limit}"
-    _cache["data"][cache_key] = {
-        "response": data,
-        "timestamp": time.time()
-    }
+def set_cached_data(data):
+    """Cache the analysis results"""
+    _cache["data"] = data
+    _cache["timestamp"] = time.time()
 
 # ============================================================================
 # AFFILIATE LINK DATABASE
@@ -330,7 +324,7 @@ async def perform_analysis(limit=100):
             # Get purchase links
             purchase_links = get_purchase_links(game.name)
             
-            # Get box art URL
+            # Get box art URL (Twitch provides this)
             box_art_url = game.box_art_url.replace('{width}', '285').replace('{height}', '380') if game.box_art_url else None
             
             opportunity = {
@@ -354,8 +348,6 @@ async def perform_analysis(limit=100):
         except Exception as e:
             logger.error(f"Error processing game {game.name}: {e}")
             continue
-    
-    logger.info(f"Analysis complete. Returning top {limit} opportunities.")
     
     # Close Twitch connection
     await twitch.close()
@@ -398,10 +390,11 @@ def root():
 @app.route("/api/v1/health")
 def health():
     """Health check for monitoring"""
+    cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
     return jsonify({
         "status": "healthy",
-        "cache_active": len(_cache["data"]) > 0,
-        "cached_limits": list(_cache["data"].keys()),
+        "cache_active": _cache["data"] is not None,
+        "cache_age_seconds": cache_age,
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     })
 
@@ -427,9 +420,10 @@ def analyze_opportunities():
     
     # Check cache first
     if not force_refresh:
-        cached = get_cached_data(limit)
+        cached = get_cached_data()
         if cached:
-            logger.info(f"Returning cached data for limit={limit}")
+            logger.info("Returning cached data")
+            cached["top_opportunities"] = cached["top_opportunities"][:limit]
             return jsonify(cached)
     
     # Validate credentials
@@ -445,7 +439,7 @@ def analyze_opportunities():
         response = asyncio.run(perform_analysis(limit))
         
         # Cache the results
-        set_cached_data(limit, response)
+        set_cached_data(response)
         
         logger.info(f"Analysis complete. Returning top {limit} opportunities.")
         
