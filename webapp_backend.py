@@ -304,6 +304,9 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
+    # Fetch stream data for each game
+    opportunities = []
+    
     # Process games sequentially to avoid rate limits (slower but reliable)
     for idx, game in enumerate(games):
         try:
