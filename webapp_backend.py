@@ -298,9 +298,13 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Process as many as possible before timeout (batches of 5 for speed)
+    # Only ANALYZE the number requested (limit parameter) to avoid timeout
+    games_to_analyze = games[:limit * 2]  # Analyze 2x the limit to have more to rank
+    logger.info(f"Will analyze first {len(games_to_analyze)} games (requested limit: {limit})")
+    
+    # Process games in batches to avoid timeouts and rate limits
     opportunities = []
-    batch_size = 5  # Increased from 3 to process more games
+    batch_size = 5
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
@@ -348,11 +352,11 @@ async def perform_analysis(limit=100):
             logger.error(f"Error processing game {game.name}: {e}")
             return None
     
-    # Process in batches of 5 (process as many as time allows)
-    for i in range(0, len(games), batch_size):
-        batch = games[i:i+batch_size]
+    # Process in batches of 5
+    for i in range(0, len(games_to_analyze), batch_size):
+        batch = games_to_analyze[i:i+batch_size]
         batch_num = (i // batch_size) + 1
-        total_batches = (len(games) + batch_size - 1) // batch_size
+        total_batches = (len(games_to_analyze) + batch_size - 1) // batch_size
         
         logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} games)")
         
@@ -365,10 +369,10 @@ async def perform_analysis(limit=100):
                 opportunities.append(result)
         
         # Small delay between batches
-        if i + batch_size < len(games):
+        if i + batch_size < len(games_to_analyze):
             await asyncio.sleep(0.5)
     
-    logger.info(f"Analysis complete. Processed {len(opportunities)} out of {len(games)} games")
+    logger.info(f"Analysis complete. Processed {len(opportunities)} out of {len(games_to_analyze)} games")
     
     # Close Twitch connection
     await twitch.close()
