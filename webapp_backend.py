@@ -304,12 +304,12 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Analyze only the first 10 games to keep it fast
+    # Analyze only the first 5 games to keep it fast and reliable
     opportunities = []
     
-    for idx, game in enumerate(games[:10]):  # Only process first 10
+    for idx, game in enumerate(games[:5]):  # Only process first 5
         try:
-            logger.info(f"Processing game {idx + 1}/10: {game.name}")
+            logger.info(f"Processing game {idx + 1}/5: {game.name}")
             
             # Get streams for this game
             streams = []
