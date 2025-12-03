@@ -299,12 +299,12 @@ async def perform_analysis(limit=100):
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
     # Only ANALYZE the number requested (limit parameter) to avoid timeout
-    games_to_analyze = games[:limit * 2]  # Analyze 2x the limit to have more to rank
+    games_to_analyze = games[:limit * 3]  # Analyze 3x the limit for better ranking
     logger.info(f"Will analyze first {len(games_to_analyze)} games (requested limit: {limit})")
     
     # Process games in batches to avoid timeouts and rate limits
     opportunities = []
-    batch_size = 5
+    batch_size = 8  # Increased from 5 to process more games
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
