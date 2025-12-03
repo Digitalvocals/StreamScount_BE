@@ -304,59 +304,27 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Fetch stream data for each game
+    # Simple test - just return game info without stream analysis
     opportunities = []
     
-    # Process games sequentially to avoid rate limits (slower but reliable)
     for idx, game in enumerate(games):
-        try:
-            logger.info(f"Processing game {idx + 1}/{len(games)}: {game.name}")
-            
-            # Get streams for this game
-            streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=30):
-                streams.append(stream)
-            
-            if not streams:
-                continue
-            
-            # Calculate metrics
-            total_viewers = sum(s.viewer_count for s in streams)
-            channel_count = len(streams)
-            
-            if channel_count == 0 or total_viewers == 0:
-                continue
-            
-            # Calculate scores
-            disc, viab, eng, overall = calculate_all_scores(total_viewers, channel_count)
-            
-            # Get purchase links
-            purchase_links = get_purchase_links(game.name)
-            
-            # Get box art URL
-            box_art_url = game.box_art_url.replace('{width}', '285').replace('{height}', '380') if game.box_art_url else None
-            
-            opportunity = {
-                "rank": 0,  # Will be set after sorting
-                "name": game.name,
-                "viewers": total_viewers,
-                "channels": channel_count,
-                "avg_viewers_per_channel": round(total_viewers / channel_count, 1),
-                "discoverability_score": round(disc, 3),
-                "viability_score": round(viab, 3),
-                "engagement_score": round(eng, 3),
-                "overall_score": round(overall, 3),
-                "recommendation": get_recommendation(overall, channel_count),
-                "trend": get_trend_indicator(overall),
-                "purchase_links": purchase_links,
-                "box_art_url": box_art_url
-            }
-            
-            opportunities.append(opportunity)
-            
-        except Exception as e:
-            logger.error(f"Error processing game {game.name}: {e}")
-            continue
+        opportunities.append({
+            "rank": idx + 1,
+            "name": game.name,
+            "viewers": 0,
+            "channels": 0,
+            "avg_viewers_per_channel": 0,
+            "discoverability_score": 0,
+            "viability_score": 0,
+            "engagement_score": 0,
+            "overall_score": 0,
+            "recommendation": "Testing",
+            "trend": "⬆️",
+            "purchase_links": {"steam": None, "epic": None, "free": False},
+            "box_art_url": game.box_art_url.replace('{width}', '285').replace('{height}', '380') if game.box_art_url else None
+        })
+    
+    logger.info(f"Returning {len(opportunities)} games")
     
     # Close Twitch connection
     await twitch.close()
