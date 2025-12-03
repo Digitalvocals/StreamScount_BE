@@ -286,20 +286,20 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # ALWAYS fetch 100 games to find hidden gems (not just top 15 most-viewed)
-    logger.info(f"Fetching top 100 games from Twitch...")
+    # ALWAYS fetch 200 games to find even more hidden gems
+    logger.info(f"Fetching top 200 games from Twitch...")
     games = []
     count = 0
-    async for game in twitch.get_top_games(first=100):
+    async for game in twitch.get_top_games(first=200):
         games.append(game)
         count += 1
-        if count >= 100:  # Hard stop at 100
+        if count >= 200:  # Hard stop at 200
             break
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Analyze ALL 100 games to find the best opportunities
-    games_to_analyze = games  # No skipping, analyze all 100
+    # Analyze ALL 200 games to find the best opportunities
+    games_to_analyze = games  # No skipping, analyze all 200
     logger.info(f"Will analyze ALL {len(games_to_analyze)} games (requested limit: {limit})")
     
     # Process games in batches to avoid timeouts and rate limits
