@@ -30,8 +30,22 @@ TWITCH_APP_SECRET = os.getenv("TWITCH_APP_SECRET")
 
 # Initialize Flask
 app = Flask(__name__)
-# Enable CORS for all domains (including Vercel)
-CORS(app, resources={r"/*": {"origins": "*"}})
+# Enable CORS with explicit configuration
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
 
 # ============================================================================
 # ALGORITHM CONFIGURATION
