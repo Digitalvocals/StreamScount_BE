@@ -60,27 +60,33 @@ WEIGHT_ENGAGEMENT = 0.20
 # ============================================================================
 
 _cache = {
-    "data": None,
-    "timestamp": 0,
+    "data": {},  # Changed to dict to store multiple limits
     "expires_in": 900  # 15 minutes
 }
 
-def get_cached_data():
-    """Get cached analysis if still valid"""
-    if _cache["data"] is None:
+def get_cached_data(limit):
+    """Get cached analysis if still valid for this limit"""
+    cache_key = f"limit_{limit}"
+    
+    if cache_key not in _cache["data"]:
         return None
     
-    age = time.time() - _cache["timestamp"]
+    cached = _cache["data"][cache_key]
+    age = time.time() - cached["timestamp"]
+    
     if age > _cache["expires_in"]:
         return None
     
-    _cache["data"]["cache_expires_in_seconds"] = int(_cache["expires_in"] - age)
-    return _cache["data"]
+    cached["response"]["cache_expires_in_seconds"] = int(_cache["expires_in"] - age)
+    return cached["response"]
 
-def set_cached_data(data):
-    """Cache the analysis results"""
-    _cache["data"] = data
-    _cache["timestamp"] = time.time()
+def set_cached_data(limit, data):
+    """Cache the analysis results for this limit"""
+    cache_key = f"limit_{limit}"
+    _cache["data"][cache_key] = {
+        "response": data,
+        "timestamp": time.time()
+    }
 
 # ============================================================================
 # AFFILIATE LINK DATABASE
@@ -390,11 +396,10 @@ def root():
 @app.route("/api/v1/health")
 def health():
     """Health check for monitoring"""
-    cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
     return jsonify({
         "status": "healthy",
-        "cache_active": _cache["data"] is not None,
-        "cache_age_seconds": cache_age,
+        "cache_active": len(_cache["data"]) > 0,
+        "cached_limits": list(_cache["data"].keys()),
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     })
 
@@ -420,10 +425,9 @@ def analyze_opportunities():
     
     # Check cache first
     if not force_refresh:
-        cached = get_cached_data()
+        cached = get_cached_data(limit)
         if cached:
-            logger.info("Returning cached data")
-            cached["top_opportunities"] = cached["top_opportunities"][:limit]
+            logger.info(f"Returning cached data for limit={limit}")
             return jsonify(cached)
     
     # Validate credentials
@@ -439,7 +443,7 @@ def analyze_opportunities():
         response = asyncio.run(perform_analysis(limit))
         
         # Cache the results
-        set_cached_data(response)
+        set_cached_data(limit, response)
         
         logger.info(f"Analysis complete. Returning top {limit} opportunities.")
         
