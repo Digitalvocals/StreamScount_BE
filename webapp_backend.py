@@ -286,20 +286,20 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # ALWAYS fetch 200 games to find even more hidden gems
-    logger.info(f"Fetching top 200 games from Twitch...")
+    # Fetch 100 games (Twitch API maximum per call)
+    logger.info(f"Fetching top 100 games from Twitch...")
     games = []
     count = 0
-    async for game in twitch.get_top_games(first=200):
+    async for game in twitch.get_top_games(first=100):
         games.append(game)
         count += 1
-        if count >= 200:  # Hard stop at 200
+        if count >= 100:
             break
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Analyze ALL 200 games to find the best opportunities
-    games_to_analyze = games  # No skipping, analyze all 200
+    # Analyze ALL 100 games to find the best opportunities
+    games_to_analyze = games
     logger.info(f"Will analyze ALL {len(games_to_analyze)} games (requested limit: {limit})")
     
     # Process games in batches to avoid timeouts and rate limits
@@ -322,6 +322,11 @@ async def perform_analysis(limit=100):
             channel_count = len(streams)
             
             if channel_count == 0 or total_viewers == 0:
+                return None
+            
+            # FILTER: Skip games with more than 15k viewers (too big for small streamers)
+            if total_viewers > 15000:
+                logger.info(f"Skipping {game.name} - too many viewers ({total_viewers})")
                 return None
             
             # Calculate scores
