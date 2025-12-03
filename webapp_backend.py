@@ -286,14 +286,14 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Fetch top games - limit to 100 max
-    logger.info(f"Fetching top 100 games from Twitch...")
+    # Fetch top games - use the limit parameter
+    logger.info(f"Fetching top {limit} games from Twitch...")
     games = []
     count = 0
-    async for game in twitch.get_top_games(first=100):
+    async for game in twitch.get_top_games(first=limit):
         games.append(game)
         count += 1
-        if count >= 100:  # Hard stop at 100
+        if count >= limit:  # Hard stop at limit
             break
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
