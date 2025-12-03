@@ -410,7 +410,7 @@ async def perform_analysis(limit=100):
     response = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         "total_games_analyzed": len(opportunities),
-        "top_opportunities": opportunities[:limit],
+        "top_opportunities": opportunities,  # Return ALL opportunities
         "cache_expires_in_seconds": _cache["expires_in"],
         "next_update": datetime.fromtimestamp(time.time() + _cache["expires_in"]).isoformat() + "Z"
     }
