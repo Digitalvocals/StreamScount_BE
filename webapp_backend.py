@@ -298,13 +298,13 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Skip the top 20 most-viewed games (too saturated) and analyze further down
-    games_to_analyze = games[20:20 + (limit * 5)]  # Skip first 20, analyze next 75 games (ranks 21-95)
-    logger.info(f"Skipping top 20 saturated games. Will analyze games ranked 21-{20+len(games_to_analyze)} (requested limit: {limit})")
+    # Analyze ALL 100 games to find the best opportunities
+    games_to_analyze = games  # No skipping, analyze all 100
+    logger.info(f"Will analyze ALL {len(games_to_analyze)} games (requested limit: {limit})")
     
     # Process games in batches to avoid timeouts and rate limits
     opportunities = []
-    batch_size = 20  # Increased to 20 for faster processing
+    batch_size = 20  # Process 20 games per batch for maximum speed
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
