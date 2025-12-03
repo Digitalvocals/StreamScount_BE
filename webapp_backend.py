@@ -346,6 +346,15 @@ async def perform_analysis(limit=100):
                 logger.info(f"Skipping {game.name} - too many viewers ({total_viewers})")
                 return None
             
+            # FILTER: Skip games where one streamer dominates (70%+ of viewership)
+            if streams:
+                top_streamer_viewers = streams[0].viewer_count  # Streams are sorted by viewers
+                dominance_ratio = top_streamer_viewers / total_viewers if total_viewers > 0 else 0
+                
+                if dominance_ratio > 0.70:  # If top streamer has 70%+ of viewers
+                    logger.info(f"Skipping {game.name} - dominated by one streamer ({top_streamer_viewers}/{total_viewers} = {dominance_ratio:.1%})")
+                    return None
+            
             # Calculate scores
             disc, viab, eng, overall = calculate_all_scores(total_viewers, channel_count)
             
