@@ -304,20 +304,17 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Analyze only the first 5 games to keep it fast and reliable
+    # Fetch stream data for each game
     opportunities = []
     
-    for idx, game in enumerate(games[:5]):  # Only process first 5
+    for game in games:
         try:
-            logger.info(f"Processing game {idx + 1}/5: {game.name}")
-            
             # Get streams for this game
             streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=50):
+            async for stream in twitch.get_streams(game_id=game.id, first=100):
                 streams.append(stream)
             
             if not streams:
-                logger.info(f"No streams found for {game.name}, skipping")
                 continue
             
             # Calculate metrics
@@ -353,13 +350,12 @@ async def perform_analysis(limit=100):
             }
             
             opportunities.append(opportunity)
-            logger.info(f"Successfully analyzed {game.name}: score {overall:.3f}")
             
         except Exception as e:
             logger.error(f"Error processing game {game.name}: {e}")
             continue
     
-    logger.info(f"Analysis complete. Processed {len(opportunities)} games")
+    logger.info(f"Analysis complete. Returning top {limit} opportunities.")
     
     # Close Twitch connection
     await twitch.close()
