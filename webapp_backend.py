@@ -304,25 +304,26 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Fetch stream data for each game
+    # Process games concurrently in batches for speed
     opportunities = []
     
-    for game in games:
+    async def process_game(game):
+        """Process a single game and return opportunity data"""
         try:
-            # Get streams for this game
+            # Get streams for this game (reduced to 50 for speed)
             streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=100):
+            async for stream in twitch.get_streams(game_id=game.id, first=50):
                 streams.append(stream)
             
             if not streams:
-                continue
+                return None
             
             # Calculate metrics
             total_viewers = sum(s.viewer_count for s in streams)
             channel_count = len(streams)
             
             if channel_count == 0 or total_viewers == 0:
-                continue
+                return None
             
             # Calculate scores
             disc, viab, eng, overall = calculate_all_scores(total_viewers, channel_count)
@@ -330,10 +331,10 @@ async def perform_analysis(limit=100):
             # Get purchase links
             purchase_links = get_purchase_links(game.name)
             
-            # Get box art URL (Twitch provides this)
+            # Get box art URL
             box_art_url = game.box_art_url.replace('{width}', '285').replace('{height}', '380') if game.box_art_url else None
             
-            opportunity = {
+            return {
                 "rank": 0,  # Will be set after sorting
                 "name": game.name,
                 "viewers": total_viewers,
@@ -349,11 +350,23 @@ async def perform_analysis(limit=100):
                 "box_art_url": box_art_url
             }
             
-            opportunities.append(opportunity)
-            
         except Exception as e:
             logger.error(f"Error processing game {game.name}: {e}")
-            continue
+            return None
+    
+    # Process games in batches of 10 concurrently
+    batch_size = 10
+    for i in range(0, len(games), batch_size):
+        batch = games[i:i+batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1}/{(len(games) + batch_size - 1)//batch_size}")
+        
+        # Process batch concurrently
+        results = await asyncio.gather(*[process_game(game) for game in batch])
+        
+        # Add successful results to opportunities
+        for result in results:
+            if result:
+                opportunities.append(result)
     
     # Close Twitch connection
     await twitch.close()
