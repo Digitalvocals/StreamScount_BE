@@ -310,9 +310,9 @@ async def perform_analysis(limit=100):
     async def process_game(game):
         """Process a single game and return opportunity data"""
         try:
-            # Get streams for this game (reduced to 50 for speed)
+            # Get streams for this game (30 is sufficient for accuracy)
             streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=50):
+            async for stream in twitch.get_streams(game_id=game.id, first=30):
                 streams.append(stream)
             
             if not streams:
@@ -354,8 +354,8 @@ async def perform_analysis(limit=100):
             logger.error(f"Error processing game {game.name}: {e}")
             return None
     
-    # Process games in batches of 10 concurrently
-    batch_size = 10
+    # Process games in smaller batches to avoid rate limits
+    batch_size = 3  # Reduced from 10 to avoid Twitch rate limits
     for i in range(0, len(games), batch_size):
         batch = games[i:i+batch_size]
         logger.info(f"Processing batch {i//batch_size + 1}/{(len(games) + batch_size - 1)//batch_size}")
@@ -367,6 +367,10 @@ async def perform_analysis(limit=100):
         for result in results:
             if result:
                 opportunities.append(result)
+        
+        # Small delay between batches to avoid rate limits
+        if i + batch_size < len(games):
+            await asyncio.sleep(0.5)
     
     # Close Twitch connection
     await twitch.close()
