@@ -30,7 +30,8 @@ TWITCH_APP_SECRET = os.getenv("TWITCH_APP_SECRET")
 
 # Initialize Flask
 app = Flask(__name__)
-CORS(app)
+# Enable CORS for all domains (including Vercel)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ============================================================================
 # ALGORITHM CONFIGURATION
