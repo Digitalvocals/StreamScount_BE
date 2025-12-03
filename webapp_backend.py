@@ -286,9 +286,11 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Fetch 100 games (Twitch API maximum per call)
-    logger.info(f"Fetching top 100 games from Twitch...")
+    # Fetch 150 games (to ensure we get 100+ under 15k viewers after filtering)
+    logger.info(f"Fetching top 150 games from Twitch using pagination...")
     games = []
+    
+    # First batch: games 1-100
     count = 0
     async for game in twitch.get_top_games(first=100):
         games.append(game)
@@ -296,11 +298,26 @@ async def perform_analysis(limit=100):
         if count >= 100:
             break
     
-    logger.info(f"Retrieved {len(games)} games from Twitch")
+    logger.info(f"Fetched first 100 games")
     
-    # Analyze ALL 100 games to find the best opportunities
+    # Second batch: games 101-150 (using pagination)
+    # Note: This may need adjustment based on TwitchAPI library pagination support
+    try:
+        count = 0
+        async for game in twitch.get_top_games(first=50, after=games[-1].id if games else None):
+            games.append(game)
+            count += 1
+            if count >= 50:
+                break
+        logger.info(f"Fetched additional {count} games, total: {len(games)}")
+    except Exception as e:
+        logger.warning(f"Could not fetch additional games via pagination: {e}")
+    
+    logger.info(f"Retrieved {len(games)} total games from Twitch")
+    
+    # Analyze ALL fetched games to find ones under 15k viewers
     games_to_analyze = games
-    logger.info(f"Will analyze ALL {len(games_to_analyze)} games (requested limit: {limit})")
+    logger.info(f"Will analyze ALL {len(games_to_analyze)} games (target: 100 under 15k viewers)")
     
     # Process games in batches to avoid timeouts and rate limits
     opportunities = []
