@@ -286,21 +286,21 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Fetch top games - use the limit parameter
-    logger.info(f"Fetching top {limit} games from Twitch...")
+    # ALWAYS fetch 100 games to find hidden gems (not just top 15 most-viewed)
+    logger.info(f"Fetching top 100 games from Twitch...")
     games = []
     count = 0
-    async for game in twitch.get_top_games(first=limit):
+    async for game in twitch.get_top_games(first=100):
         games.append(game)
         count += 1
-        if count >= limit:  # Hard stop at limit
+        if count >= 100:  # Hard stop at 100
             break
     
     logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    # Process games in batches to avoid timeouts and rate limits
+    # Process as many as possible before timeout (batches of 5 for speed)
     opportunities = []
-    batch_size = 3
+    batch_size = 5  # Increased from 3 to process more games
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
@@ -348,7 +348,7 @@ async def perform_analysis(limit=100):
             logger.error(f"Error processing game {game.name}: {e}")
             return None
     
-    # Process in batches of 3 with delays
+    # Process in batches of 5 (process as many as time allows)
     for i in range(0, len(games), batch_size):
         batch = games[i:i+batch_size]
         batch_num = (i // batch_size) + 1
@@ -366,9 +366,9 @@ async def perform_analysis(limit=100):
         
         # Small delay between batches
         if i + batch_size < len(games):
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
     
-    logger.info(f"Analysis complete. Processed {len(opportunities)} games")
+    logger.info(f"Analysis complete. Processed {len(opportunities)} out of {len(games)} games")
     
     # Close Twitch connection
     await twitch.close()
