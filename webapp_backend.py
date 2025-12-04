@@ -286,56 +286,25 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Load game list from JSON file
-    logger.info("Loading game list from top_games.json...")
-    try:
-        import json
-        with open('top_games.json', 'r', encoding='utf-8') as f:
-            game_data = json.load(f)
-            # Only use first 300 games to avoid timeout (most popular games)
-            game_names = [g['name'] for g in game_data['games'][:300]]
-        logger.info(f"Loaded {len(game_names)} games from file (top 300)")
-    except FileNotFoundError:
-        logger.warning("top_games.json not found, falling back to API")
-        # Fallback: fetch from API
-        game_names = []
-        async for game in twitch.get_top_games(first=100):
-            game_names.append(game.name)
-        logger.info(f"Fetched {len(game_names)} games from API as fallback")
-    
-    # Validate games in chunks (Twitch API limit: 100 names per call)
-    logger.info("Validating games with Twitch API...")
+    # Fetch 100 games (Twitch API maximum per call)
+    logger.info(f"Fetching top 100 games from Twitch...")
     games = []
-    chunk_size = 100
+    count = 0
+    async for game in twitch.get_top_games(first=100):
+        games.append(game)
+        count += 1
+        if count >= 100:
+            break
     
-    for i in range(0, len(game_names), chunk_size):
-        chunk = game_names[i:i+chunk_size]
-        chunk_num = (i // chunk_size) + 1
-        total_chunks = (len(game_names) + chunk_size - 1) // chunk_size
-        
-        logger.info(f"Validating chunk {chunk_num}/{total_chunks} ({len(chunk)} games)")
-        
-        try:
-            async for game in twitch.get_games(names=chunk):
-                games.append(game)
-            
-            # Delay between chunks to avoid rate limits
-            if i + chunk_size < len(game_names):
-                await asyncio.sleep(1.0)
-                
-        except Exception as e:
-            logger.warning(f"Error validating chunk {chunk_num}: {e}")
-            continue
+    logger.info(f"Retrieved {len(games)} games from Twitch")
     
-    logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
-    
-    # Analyze ALL validated games to find ones under 15k viewers
+    # Analyze ALL 100 games to find ones under 15k viewers
     games_to_analyze = games
     logger.info(f"Will analyze ALL {len(games_to_analyze)} games (filtering for <15k viewers)")
     
     # Process games in batches to avoid timeouts and rate limits
     opportunities = []
-    batch_size = 20  # Process 20 games per batch for maximum speed
+    batch_size = 20  # Process 20 games per batch
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
