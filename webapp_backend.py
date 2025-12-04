@@ -286,38 +286,51 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Fetch 150 games (to ensure we get 100+ under 15k viewers after filtering)
-    logger.info(f"Fetching top 150 games from Twitch using pagination...")
-    games = []
-    
-    # First batch: games 1-100
-    count = 0
-    async for game in twitch.get_top_games(first=100):
-        games.append(game)
-        count += 1
-        if count >= 100:
-            break
-    
-    logger.info(f"Fetched first 100 games")
-    
-    # Second batch: games 101-150 (using pagination)
-    # Note: This may need adjustment based on TwitchAPI library pagination support
+    # Load game list from JSON file
+    logger.info("Loading game list from top_games.json...")
     try:
-        count = 0
-        async for game in twitch.get_top_games(first=50, after=games[-1].id if games else None):
-            games.append(game)
-            count += 1
-            if count >= 50:
-                break
-        logger.info(f"Fetched additional {count} games, total: {len(games)}")
-    except Exception as e:
-        logger.warning(f"Could not fetch additional games via pagination: {e}")
+        import json
+        with open('top_games.json', 'r', encoding='utf-8') as f:
+            game_data = json.load(f)
+            game_names = [g['name'] for g in game_data['games']]
+        logger.info(f"Loaded {len(game_names)} games from file")
+    except FileNotFoundError:
+        logger.warning("top_games.json not found, falling back to API")
+        # Fallback: fetch from API
+        game_names = []
+        async for game in twitch.get_top_games(first=100):
+            game_names.append(game.name)
+        logger.info(f"Fetched {len(game_names)} games from API as fallback")
     
-    logger.info(f"Retrieved {len(games)} total games from Twitch")
+    # Validate games in chunks (Twitch API limit: 100 names per call)
+    logger.info("Validating games with Twitch API...")
+    games = []
+    chunk_size = 100
     
-    # Analyze ALL fetched games to find ones under 15k viewers
+    for i in range(0, len(game_names), chunk_size):
+        chunk = game_names[i:i+chunk_size]
+        chunk_num = (i // chunk_size) + 1
+        total_chunks = (len(game_names) + chunk_size - 1) // chunk_size
+        
+        logger.info(f"Validating chunk {chunk_num}/{total_chunks} ({len(chunk)} games)")
+        
+        try:
+            async for game in twitch.get_games(names=chunk):
+                games.append(game)
+            
+            # Delay between chunks to avoid rate limits
+            if i + chunk_size < len(game_names):
+                await asyncio.sleep(1.0)
+                
+        except Exception as e:
+            logger.warning(f"Error validating chunk {chunk_num}: {e}")
+            continue
+    
+    logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
+    
+    # Analyze ALL validated games to find ones under 15k viewers
     games_to_analyze = games
-    logger.info(f"Will analyze ALL {len(games_to_analyze)} games (target: 100 under 15k viewers)")
+    logger.info(f"Will analyze ALL {len(games_to_analyze)} games (filtering for <15k viewers)")
     
     # Process games in batches to avoid timeouts and rate limits
     opportunities = []
