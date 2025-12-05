@@ -484,8 +484,8 @@ def analyze_opportunities():
     limit = request.args.get('limit', default=100, type=int)
     force_refresh = request.args.get('force_refresh', default='false').lower() == 'true'
     
-    # Validate limit
-    limit = min(max(limit, 1), 100)
+    # Validate limit (max 200 for test)
+    limit = min(max(limit, 1), 200)
     
     # Check cache first
     if not force_refresh:
