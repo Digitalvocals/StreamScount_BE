@@ -333,26 +333,22 @@ async def perform_analysis(limit=100):
     game_map = {game.id: game for game in games}
     game_ids_we_care_about = set(game_map.keys())
     
-    # BULK FETCH: Get ALL streams at once!
-    logger.info("Fetching ALL stream data from Twitch in bulk...")
+    # BULK FETCH: Get streams (limit to reasonable amount)
+    logger.info("Fetching stream data from Twitch in bulk...")
     all_streams = []
-    fetch_rounds = 10  # Fetch up to 1000 streams (10 x 100)
+    max_streams = 1000  # Fetch up to 1000 streams total
     
-    for fetch_round in range(fetch_rounds):
-        logger.info(f"Fetching stream batch {fetch_round + 1}/{fetch_rounds}...")
-        batch_streams = []
+    stream_count = 0
+    async for stream in twitch.get_streams(first=100):
+        all_streams.append(stream)
+        stream_count += 1
         
-        async for stream in twitch.get_streams(first=100):
-            batch_streams.append(stream)
-        
-        if not batch_streams:
-            logger.info("No more streams available")
+        if stream_count >= max_streams:
             break
         
-        all_streams.extend(batch_streams)
-        logger.info(f"Fetched {len(batch_streams)} streams, total: {len(all_streams)}")
-        
-        await asyncio.sleep(0.5)
+        # Log progress every 100 streams
+        if stream_count % 100 == 0:
+            logger.info(f"Fetched {stream_count} streams...")
     
     logger.info(f"Fetched {len(all_streams)} total streams from Twitch")
     
