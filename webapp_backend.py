@@ -329,11 +329,11 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # PARALLEL FETCH: Fetch streams for games in batches of 5 at once
+    # PARALLEL FETCH: Fetch streams for games in batches of 10 at once
     logger.info(f"Fetching stream data for all {len(games)} games in parallel batches...")
     
     streams_by_game = {}
-    batch_size = 5  # Fetch 5 games at once
+    batch_size = 10  # Fetch 10 games at once for speed
     
     for i in range(0, len(games), batch_size):
         batch = games[i:i+batch_size]
