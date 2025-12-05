@@ -286,13 +286,13 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # TEST: Load 150 games from JSON file
-    logger.info("TEST: Loading top 150 games from top_games.json...")
+    # TEST: Load 200 games from JSON file
+    logger.info("TEST: Loading top 200 games from top_games.json...")
     try:
         import json
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
-            game_names = [g['name'] for g in game_data['games'][:150]]
+            game_names = [g['name'] for g in game_data['games'][:200]]
         logger.info(f"TEST: Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
