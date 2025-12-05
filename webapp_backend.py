@@ -432,7 +432,7 @@ async def perform_analysis(limit=100):
             
             # Get purchase links and box art
             purchase_links = get_purchase_links(game.name)
-            box_art_url = game.box_art_url.format(width=285, height=380) if game.box_art_url else None
+            box_art_url = game.box_art_url.format(width=285, height=380) if game.box_art_url else ""
             
             # Create opportunity entry
             opportunities.append({
