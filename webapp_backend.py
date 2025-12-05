@@ -331,9 +331,9 @@ async def perform_analysis(limit=100):
     games_to_analyze = games
     logger.info(f"TEST: Will analyze {len(games_to_analyze)} games (filtering for <15k viewers)")
     
-    # Process games in batches - smaller batches with delays
+    # Process games in batches - larger batches for speed
     opportunities = []
-    batch_size = 10  # Smaller batches to avoid rate limits
+    batch_size = 15  # Increased from 10 for faster processing
     
     async def process_game(game):
         """Process a single game and return opportunity data"""
@@ -412,9 +412,9 @@ async def perform_analysis(limit=100):
                 opportunities.append(result)
         
         # Small delay between batches
-        # TEST: Longer delay between batches to avoid rate limits
+        # TEST: Shorter delay between batches for speed
         if i + batch_size < len(games_to_analyze):
-            await asyncio.sleep(1.5)  # Increased from 0.5 to avoid rate limits
+            await asyncio.sleep(1.0)  # Reduced from 1.5s for faster processing
     
     logger.info(f"Analysis complete. Processed {len(opportunities)} out of {len(games_to_analyze)} games")
     
