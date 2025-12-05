@@ -329,29 +329,41 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # NEW APPROACH: Fetch streams for EACH game first, then process locally
-    logger.info(f"Fetching stream data for all {len(games)} games (this may take 1-2 minutes)...")
+    # PARALLEL FETCH: Fetch streams for games in batches of 5 at once
+    logger.info(f"Fetching stream data for all {len(games)} games in parallel batches...")
     
     streams_by_game = {}
+    batch_size = 5  # Fetch 5 games at once
     
-    for idx, game in enumerate(games):
-        if (idx + 1) % 20 == 0:
-            logger.info(f"Fetching streams: {idx + 1}/{len(games)} games...")
+    for i in range(0, len(games), batch_size):
+        batch = games[i:i+batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(games) + batch_size - 1) // batch_size
         
-        try:
-            streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=100):
-                streams.append(stream)
-            
-            if streams:
-                streams_by_game[game.id] = {
-                    'game': game,
-                    'streams': streams
-                }
+        logger.info(f"Fetching streams: batch {batch_num}/{total_batches} ({len(batch)} games)...")
         
-        except Exception as e:
-            logger.warning(f"Error fetching streams for {game.name}: {e}")
-            continue
+        # Fetch all games in this batch concurrently
+        async def fetch_game_streams(game):
+            try:
+                streams = []
+                async for stream in twitch.get_streams(game_id=game.id, first=100):
+                    streams.append(stream)
+                
+                if streams:
+                    return (game.id, {'game': game, 'streams': streams})
+                return None
+            except Exception as e:
+                logger.warning(f"Error fetching streams for {game.name}: {e}")
+                return None
+        
+        # Fetch batch concurrently
+        results = await asyncio.gather(*[fetch_game_streams(g) for g in batch], return_exceptions=True)
+        
+        # Store results
+        for result in results:
+            if result and not isinstance(result, Exception):
+                game_id, data = result
+                streams_by_game[game_id] = data
     
     logger.info(f"Fetched stream data for {len(streams_by_game)} games")
     
