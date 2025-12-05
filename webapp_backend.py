@@ -337,7 +337,7 @@ async def perform_analysis():
     logger.info("DSWAF: Connection established")
     
     # Load 150 games from JSON file
-    logger.info("Loading top 150 games from top_games.json...")
+    logger.info("Loading top 500 games from top_games.json...")
     try:
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
@@ -375,38 +375,39 @@ async def perform_analysis():
     
     logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # PARALLEL FETCH: Fetch streams for games in batches
-    logger.info(f"Fetching stream data for all {len(games)} games in parallel batches...")
+    # BULK FETCH: Use multi-game_id API calls (up to 100 game IDs per call)
+    # This is 10x more efficient than individual calls!
+    logger.info(f"Fetching stream data for all {len(games)} games using bulk API...")
     
     streams_by_game = {}
-    batch_size = 10
+    batch_size = 100  # Twitch allows up to 100 game_ids per call
+    
+    # Create a lookup dict for game objects by ID
+    game_lookup = {g.id: g for g in games}
     
     for i in range(0, len(games), batch_size):
         batch = games[i:i+batch_size]
         batch_num = (i // batch_size) + 1
         total_batches = (len(games) + batch_size - 1) // batch_size
         
-        logger.info(f"Fetching streams: batch {batch_num}/{total_batches} ({len(batch)} games)...")
+        game_ids = [g.id for g in batch]
+        logger.info(f"Fetching streams: batch {batch_num}/{total_batches} ({len(batch)} game IDs in single API call)...")
         
-        async def fetch_game_streams(game):
-            try:
-                streams = []
-                async for stream in twitch.get_streams(game_id=game.id, first=100):
-                    streams.append(stream)
-                
-                if streams:
-                    return (game.id, {'game': game, 'streams': streams})
-                return None
-            except Exception as e:
-                logger.warning(f"Error fetching streams for {game.name}: {e}")
-                return None
-        
-        results = await asyncio.gather(*[fetch_game_streams(g) for g in batch], return_exceptions=True)
-        
-        for result in results:
-            if result and not isinstance(result, Exception):
-                game_id, data = result
-                streams_by_game[game_id] = data
+        try:
+            stream_count = 0
+            # Single API call for up to 100 games - library handles pagination
+            async for stream in twitch.get_streams(game_id=game_ids, first=100):
+                gid = stream.game_id
+                if gid not in streams_by_game:
+                    streams_by_game[gid] = {'game': game_lookup.get(gid), 'streams': []}
+                streams_by_game[gid]['streams'].append(stream)
+                stream_count += 1
+            
+            logger.info(f"  Batch {batch_num}: fetched {stream_count} streams across {len([g for g in game_ids if g in streams_by_game])} games")
+        except Exception as e:
+            logger.warning(f"Error fetching batch {batch_num}: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
     
     logger.info(f"Fetched stream data for {len(streams_by_game)} games")
     
