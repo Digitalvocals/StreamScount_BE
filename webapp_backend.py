@@ -63,51 +63,93 @@ WEIGHT_ENGAGEMENT = 0.20
 REFRESH_INTERVAL_MINUTES = 10
 
 # ============================================================================
-# CACHE - Thread-safe storage for pre-computed results
+# CACHE - File-based storage for multi-process support
 # ============================================================================
 
-_cache = {
-    "data": None,
-    "timestamp": 0,
-    "is_refreshing": False,
-    "last_refresh_duration": 0,
-    "refresh_count": 0,
-    "last_error": None
-}
+CACHE_FILE = '/tmp/streamscout_cache.json'
+STATUS_FILE = '/tmp/streamscout_status.json'
+
 _cache_lock = threading.Lock()
 
 def get_cached_data():
-    """Get cached analysis (always returns cache, never triggers refresh)"""
-    with _cache_lock:
-        if _cache["data"] is None:
+    """Get cached analysis from file (shared across all processes)"""
+    try:
+        if not os.path.exists(CACHE_FILE):
+            return None
+        
+        with open(CACHE_FILE, 'r') as f:
+            cache_data = json.load(f)
+        
+        if cache_data.get("data") is None:
             return None
         
         # Calculate time until next scheduled refresh
-        age = time.time() - _cache["timestamp"]
+        age = time.time() - cache_data.get("timestamp", 0)
         next_refresh_in = max(0, (REFRESH_INTERVAL_MINUTES * 60) - age)
         
+        # Get refresh status
+        status = get_refresh_status()
+        
         # Return a copy with timing info
-        result = _cache["data"].copy()
+        result = cache_data["data"].copy()
         result["cache_age_seconds"] = int(age)
         result["next_refresh_in_seconds"] = int(next_refresh_in)
-        result["is_refreshing"] = _cache["is_refreshing"]
+        result["is_refreshing"] = status.get("is_refreshing", False)
         return result
+    except Exception as e:
+        logger.error(f"Error reading cache: {e}")
+        return None
 
 def set_cached_data(data, duration):
-    """Store analysis results in cache"""
-    with _cache_lock:
-        _cache["data"] = data
-        _cache["timestamp"] = time.time()
-        _cache["last_refresh_duration"] = duration
-        _cache["refresh_count"] += 1
-        _cache["last_error"] = None
+    """Store analysis results in cache file"""
+    try:
+        with _cache_lock:
+            # Read existing status
+            status = get_refresh_status()
+            refresh_count = status.get("refresh_count", 0) + 1
+            
+            cache_data = {
+                "data": data,
+                "timestamp": time.time(),
+                "last_refresh_duration": duration,
+                "refresh_count": refresh_count
+            }
+            
+            with open(CACHE_FILE, 'w') as f:
+                json.dump(cache_data, f)
+            
+            # Update status
+            set_refresh_status(False)
+            
+            logger.info(f"Cache written to {CACHE_FILE}")
+    except Exception as e:
+        logger.error(f"Error writing cache: {e}")
+
+def get_refresh_status():
+    """Get refresh status from file"""
+    try:
+        if not os.path.exists(STATUS_FILE):
+            return {"is_refreshing": False, "last_error": None, "refresh_count": 0}
+        
+        with open(STATUS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {"is_refreshing": False, "last_error": None, "refresh_count": 0}
 
 def set_refresh_status(is_refreshing, error=None):
-    """Update refresh status"""
-    with _cache_lock:
-        _cache["is_refreshing"] = is_refreshing
+    """Update refresh status in file"""
+    try:
+        status = get_refresh_status()
+        status["is_refreshing"] = is_refreshing
         if error:
-            _cache["last_error"] = str(error)
+            status["last_error"] = str(error)
+        elif not is_refreshing:
+            status["last_error"] = None
+        
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f)
+    except Exception as e:
+        logger.error(f"Error writing status: {e}")
 
 # ============================================================================
 # AFFILIATE LINK DATABASE
@@ -299,7 +341,7 @@ async def perform_analysis():
     try:
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
-            game_names = [g['name'] for g in game_data['games'][:500]]
+            game_names = [g['name'] for g in game_data['games'][:150]]
         logger.info(f"Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
@@ -509,7 +551,8 @@ def background_refresh():
     Called by scheduler every REFRESH_INTERVAL_MINUTES.
     Fetches fresh data and updates the cache.
     """
-    if _cache["is_refreshing"]:
+    status = get_refresh_status()
+    if status.get("is_refreshing", False):
         logger.info("Refresh already in progress, skipping...")
         return
     
@@ -523,7 +566,7 @@ def background_refresh():
         try:
             response, duration = loop.run_until_complete(perform_analysis())
             set_cached_data(response, duration)
-            logger.info(f"Cache updated successfully (refresh #{_cache['refresh_count']})")
+            logger.info(f"Cache updated successfully")
         finally:
             loop.close()
             
@@ -588,45 +631,76 @@ def root():
 @app.route("/api/v1/health")
 def health():
     """Health check for monitoring"""
-    with _cache_lock:
-        cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+            cache_age = time.time() - cache_data.get("timestamp", 0) if cache_data.get("data") else None
+            has_data = cache_data.get("data") is not None
+            refresh_count = cache_data.get("refresh_count", 0)
+            last_duration = cache_data.get("last_refresh_duration", 0)
+        else:
+            cache_age = None
+            has_data = False
+            refresh_count = 0
+            last_duration = 0
         
-    return jsonify({
-        "status": "healthy",
-        "cache_active": _cache["data"] is not None,
-        "cache_age_seconds": int(cache_age) if cache_age else None,
-        "is_refreshing": _cache["is_refreshing"],
-        "refresh_count": _cache["refresh_count"],
-        "last_refresh_duration": _cache["last_refresh_duration"],
-        "last_error": _cache["last_error"],
-        "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    })
+        status = get_refresh_status()
+        
+        return jsonify({
+            "status": "healthy",
+            "cache_active": has_data,
+            "cache_age_seconds": int(cache_age) if cache_age else None,
+            "is_refreshing": status.get("is_refreshing", False),
+            "refresh_count": refresh_count,
+            "last_refresh_duration": last_duration,
+            "last_error": status.get("last_error"),
+            "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/api/v1/status")
 def status():
     """Detailed status for debugging"""
-    with _cache_lock:
-        cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
-        next_refresh = max(0, (REFRESH_INTERVAL_MINUTES * 60) - cache_age) if cache_age else 0
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+            cache_age = time.time() - cache_data.get("timestamp", 0) if cache_data.get("data") else None
+            has_data = cache_data.get("data") is not None
+            next_refresh = max(0, (REFRESH_INTERVAL_MINUTES * 60) - cache_age) if cache_age else 0
+            refresh_count = cache_data.get("refresh_count", 0)
+            last_duration = cache_data.get("last_refresh_duration", 0)
+        else:
+            cache_age = None
+            has_data = False
+            next_refresh = 0
+            refresh_count = 0
+            last_duration = 0
         
-    return jsonify({
-        "service": "StreamScout",
-        "version": "3.0.0",
-        "architecture": "background_worker",
-        "cache": {
-            "has_data": _cache["data"] is not None,
-            "age_seconds": int(cache_age) if cache_age else None,
-            "next_refresh_seconds": int(next_refresh),
-            "total_refreshes": _cache["refresh_count"],
-            "last_duration_seconds": _cache["last_refresh_duration"]
-        },
-        "worker": {
-            "is_refreshing": _cache["is_refreshing"],
-            "interval_minutes": REFRESH_INTERVAL_MINUTES,
-            "last_error": _cache["last_error"]
-        },
-        "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    })
+        refresh_status = get_refresh_status()
+        
+        return jsonify({
+            "service": "StreamScout",
+            "version": "3.0.0",
+            "architecture": "background_worker",
+            "cache": {
+                "has_data": has_data,
+                "age_seconds": int(cache_age) if cache_age else None,
+                "next_refresh_seconds": int(next_refresh),
+                "total_refreshes": refresh_count,
+                "last_duration_seconds": last_duration
+            },
+            "worker": {
+                "is_refreshing": refresh_status.get("is_refreshing", False),
+                "interval_minutes": REFRESH_INTERVAL_MINUTES,
+                "last_error": refresh_status.get("last_error")
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/api/v1/analyze")
 def analyze_opportunities():
@@ -641,17 +715,18 @@ def analyze_opportunities():
     """
     
     limit = request.args.get('limit', default=100, type=int)
-    limit = min(max(limit, 1), 500)
+    limit = min(max(limit, 1), 200)
     
     # Get from cache (instant!)
     cached = get_cached_data()
     
     if cached is None:
         # Cache not ready yet (server just started)
+        status = get_refresh_status()
         return jsonify({
             "status": "warming_up",
             "message": "StreamScout is fetching initial data. Please retry in 30-60 seconds.",
-            "is_refreshing": _cache["is_refreshing"],
+            "is_refreshing": status.get("is_refreshing", False),
             "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         }), 202  # 202 Accepted - request received, processing
     
@@ -662,7 +737,8 @@ def analyze_opportunities():
 @app.route("/api/v1/force-refresh", methods=["POST"])
 def force_refresh():
     """Force an immediate data refresh (admin use)"""
-    if _cache["is_refreshing"]:
+    status = get_refresh_status()
+    if status.get("is_refreshing", False):
         return jsonify({
             "status": "already_refreshing",
             "message": "A refresh is already in progress"
