@@ -341,7 +341,7 @@ async def perform_analysis():
     try:
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
-            game_names = [g['name'] for g in game_data['games'][:150]]
+            game_names = [g['name'] for g in game_data['games'][:500]]
         logger.info(f"Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
