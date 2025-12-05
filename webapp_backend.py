@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import logging
 import json
 import threading
+import fcntl
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -488,6 +489,21 @@ async def perform_analysis():
 # BACKGROUND WORKER
 # ============================================================================
 
+# File lock to prevent duplicate schedulers across processes
+_lock_file = None
+
+def acquire_scheduler_lock():
+    """Try to acquire exclusive lock for scheduler. Returns True if acquired."""
+    global _lock_file
+    try:
+        _lock_file = open('/tmp/streamscout_scheduler.lock', 'w')
+        fcntl.flock(_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_file.write(str(os.getpid()))
+        _lock_file.flush()
+        return True
+    except (IOError, OSError):
+        return False
+
 def background_refresh():
     """
     Called by scheduler every REFRESH_INTERVAL_MINUTES.
@@ -525,6 +541,13 @@ scheduler = BackgroundScheduler()
 
 def start_background_worker():
     """Start the background refresh scheduler"""
+    
+    # Try to acquire lock - only one process should run the scheduler
+    if not acquire_scheduler_lock():
+        logger.info("Another process owns the scheduler lock - skipping scheduler start")
+        return
+    
+    logger.info(f"Acquired scheduler lock (PID: {os.getpid()})")
     logger.info(f"Starting background worker (refresh every {REFRESH_INTERVAL_MINUTES} minutes)")
     
     # Schedule recurring refresh
@@ -667,6 +690,11 @@ def initialize_app():
     if _scheduler_started:
         return
     
+    # Prevent duplicate schedulers in gunicorn multi-process environments
+    # Only start scheduler if we're the main process or first worker
+    import os
+    worker_id = os.environ.get('GUNICORN_WORKER_ID', '0')
+    
     # Check for credentials
     if not TWITCH_APP_ID or not TWITCH_APP_SECRET:
         logger.warning("WARNING: Twitch API credentials not found!")
@@ -679,13 +707,15 @@ def initialize_app():
     logger.info("=" * 60)
     logger.info(f"Refresh interval: {REFRESH_INTERVAL_MINUTES} minutes")
     logger.info("User requests served from pre-computed cache (instant!)")
+    logger.info(f"Worker ID: {worker_id}")
     logger.info("=" * 60)
     
     # Start background worker
     start_background_worker()
     _scheduler_started = True
 
-# Initialize when module is imported (works with gunicorn)
+# Only initialize if this is the main module load (not on import by workers)
+# Use --preload in gunicorn so this runs once before forking
 initialize_app()
 
 if __name__ == "__main__":
