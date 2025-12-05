@@ -715,7 +715,7 @@ def analyze_opportunities():
     """
     
     limit = request.args.get('limit', default=100, type=int)
-    limit = min(max(limit, 1), 200)
+    limit = min(max(limit, 1), 500)
     
     # Get from cache (instant!)
     cached = get_cached_data()
