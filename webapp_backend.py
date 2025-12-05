@@ -1,10 +1,10 @@
 """
-TWITCH STREAMING OPPORTUNITY ANALYZER - WEB APP BACKEND
-========================================================
+STREAMSCOUT - TWITCH STREAMING OPPORTUNITY ANALYZER
+====================================================
+v3.0 - Background Worker Architecture
 
-Flask API that serves top streaming opportunities with affiliate links.
-Updated every 15 minutes, serves top 100 games.
-
+Key change: Data fetching happens on a schedule in the background.
+User requests ALWAYS hit pre-computed cache = instant responses.
 """
 
 from flask import Flask, jsonify, request
@@ -18,6 +18,9 @@ import math
 from datetime import datetime, timezone
 import logging
 import json
+import threading
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,32 +58,55 @@ WEIGHT_DISCOVERABILITY = 0.45
 WEIGHT_VIABILITY = 0.35
 WEIGHT_ENGAGEMENT = 0.20
 
+# Refresh interval in minutes
+REFRESH_INTERVAL_MINUTES = 10
+
 # ============================================================================
-# CACHING
+# CACHE - Thread-safe storage for pre-computed results
 # ============================================================================
 
 _cache = {
     "data": None,
     "timestamp": 0,
-    "expires_in": 900  # 15 minutes
+    "is_refreshing": False,
+    "last_refresh_duration": 0,
+    "refresh_count": 0,
+    "last_error": None
 }
+_cache_lock = threading.Lock()
 
 def get_cached_data():
-    """Get cached analysis if still valid"""
-    if _cache["data"] is None:
-        return None
-    
-    age = time.time() - _cache["timestamp"]
-    if age > _cache["expires_in"]:
-        return None
-    
-    _cache["data"]["cache_expires_in_seconds"] = int(_cache["expires_in"] - age)
-    return _cache["data"]
+    """Get cached analysis (always returns cache, never triggers refresh)"""
+    with _cache_lock:
+        if _cache["data"] is None:
+            return None
+        
+        # Calculate time until next scheduled refresh
+        age = time.time() - _cache["timestamp"]
+        next_refresh_in = max(0, (REFRESH_INTERVAL_MINUTES * 60) - age)
+        
+        # Return a copy with timing info
+        result = _cache["data"].copy()
+        result["cache_age_seconds"] = int(age)
+        result["next_refresh_in_seconds"] = int(next_refresh_in)
+        result["is_refreshing"] = _cache["is_refreshing"]
+        return result
 
-def set_cached_data(data):
-    """Cache the analysis results"""
-    _cache["data"] = data
-    _cache["timestamp"] = time.time()
+def set_cached_data(data, duration):
+    """Store analysis results in cache"""
+    with _cache_lock:
+        _cache["data"] = data
+        _cache["timestamp"] = time.time()
+        _cache["last_refresh_duration"] = duration
+        _cache["refresh_count"] += 1
+        _cache["last_error"] = None
+
+def set_refresh_status(is_refreshing, error=None):
+    """Update refresh status"""
+    with _cache_lock:
+        _cache["is_refreshing"] = is_refreshing
+        if error:
+            _cache["last_error"] = str(error)
 
 # ============================================================================
 # AFFILIATE LINK DATABASE
@@ -88,10 +114,6 @@ def set_cached_data(data):
 
 def get_purchase_links(game_name):
     """Get affiliate purchase links for a game"""
-    # This would ideally be a database, but for MVP we'll use a simple mapping
-    # You'll need to register for Steam/Epic affiliate programs and get your IDs
-    
-    # Normalize game name for URL
     normalized = game_name.lower().replace(' ', '-').replace(':', '').replace("'", '')
     
     links = {
@@ -100,7 +122,6 @@ def get_purchase_links(game_name):
         "free": False
     }
     
-    # Common free-to-play games
     free_games = [
         "league of legends", "valorant", "fortnite", "apex legends",
         "dota 2", "counter-strike 2", "team fortress 2", "warframe",
@@ -111,8 +132,6 @@ def get_purchase_links(game_name):
         links["free"] = True
         return links
     
-    # For now, return generic search links
-    # TODO: Replace with actual affiliate links from your accounts
     steam_search = f"https://store.steampowered.com/search/?term={game_name.replace(' ', '+')}"
     epic_search = f"https://store.epicgames.com/en-US/browse?q={game_name.replace(' ', '%20')}"
     
@@ -122,7 +141,7 @@ def get_purchase_links(game_name):
     return links
 
 # ============================================================================
-# SCORING ALGORITHM (Same as desktop version)
+# SCORING ALGORITHM
 # ============================================================================
 
 def calculate_discoverability_score(viewers, channels):
@@ -132,12 +151,10 @@ def calculate_discoverability_score(viewers, channels):
     
     avg_viewers_per_channel = viewers / channels
     
-    # Top-heavy detection
     if channels < 20 and avg_viewers_per_channel > 1000:
         top_heavy_penalty = min(channels / 20, 0.4)
         return top_heavy_penalty * 0.3
     
-    # Hard limits
     if channels > HARD_LIMIT_CHANNELS:
         excess = channels - HARD_LIMIT_CHANNELS
         penalty = max(0.15 - (excess / 1000), 0.01)
@@ -146,7 +163,6 @@ def calculate_discoverability_score(viewers, channels):
     if viewers > HARD_LIMIT_VIEWERS:
         return 0.05
     
-    # Channel competition score
     competition_score = 0
     
     if IDEAL_CHANNELS_MIN <= channels <= IDEAL_CHANNELS_MAX:
@@ -162,7 +178,6 @@ def calculate_discoverability_score(viewers, channels):
             excess = (channels - SATURATION_THRESHOLD) / (HARD_LIMIT_CHANNELS - SATURATION_THRESHOLD)
             competition_score = 0.3 - (excess * 0.25)
     
-    # Viewer-to-channel ratio
     ratio_score = 0
     if 50 <= avg_viewers_per_channel <= 500:
         ratio_score = 1.0
@@ -179,7 +194,6 @@ def calculate_viability_score(viewers, channels):
     if channels == 0 or viewers == 0:
         return 0.0
     
-    # Viewer count score
     viewer_score = 0
     
     if IDEAL_VIEWERS_MIN <= viewers <= IDEAL_VIEWERS_MAX:
@@ -195,7 +209,6 @@ def calculate_viability_score(viewers, channels):
         else:
             viewer_score = 0.1
     
-    # Market saturation
     saturation_score = 0
     
     if channels <= IDEAL_CHANNELS_MAX:
@@ -209,7 +222,6 @@ def calculate_viability_score(viewers, channels):
     else:
         saturation_score = 0.01
     
-    # Audience stability
     stability_score = min(channels / 10, 1.0)
     
     viability = (viewer_score * 0.50) + (saturation_score * 0.30) + (stability_score * 0.20)
@@ -223,20 +235,6 @@ def calculate_engagement_score(viewers, channels):
     avg_viewers_per_channel = viewers / channels
     engagement = min(math.log10(avg_viewers_per_channel + 1) / math.log10(500), 1.0)
     return engagement
-
-def calculate_all_scores(viewers, channels):
-    """Calculate all scores and return tuple"""
-    discoverability = calculate_discoverability_score(viewers, channels)
-    viability = calculate_viability_score(viewers, channels)
-    engagement = calculate_engagement_score(viewers, channels)
-    
-    overall = (
-        discoverability * WEIGHT_DISCOVERABILITY +
-        viability * WEIGHT_VIABILITY +
-        engagement * WEIGHT_ENGAGEMENT
-    )
-    
-    return discoverability, viability, engagement, overall
 
 def get_recommendation(overall_score, channels):
     """Generate recommendation text based on score"""
@@ -268,11 +266,17 @@ def get_trend_indicator(overall_score):
 # ASYNC ANALYSIS FUNCTION
 # ============================================================================
 
-async def perform_analysis(limit=100):
+async def perform_analysis():
     """
     Perform the Twitch analysis asynchronously
-    NEW APPROACH: Fetch all data first, process locally (no rate limits!)
+    Called by background worker, not by user requests
     """
+    
+    logger.info("=" * 60)
+    logger.info("BACKGROUND REFRESH: Starting data fetch...")
+    logger.info("=" * 60)
+    
+    start_time = time.time()
     
     # Initialize Twitch API
     twitch = await asyncio.wait_for(
@@ -289,13 +293,12 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # Load 200 games from JSON file
-    logger.info("Loading top 200 games from top_games.json...")
+    # Load 150 games from JSON file
+    logger.info("Loading top 150 games from top_games.json...")
     try:
-        import json
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
-            game_names = [g['name'] for g in game_data['games'][:200]]
+            game_names = [g['name'] for g in game_data['games'][:150]]
         logger.info(f"Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
@@ -329,11 +332,11 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # PARALLEL FETCH: Fetch streams for games in batches of 5 at once
+    # PARALLEL FETCH: Fetch streams for games in batches
     logger.info(f"Fetching stream data for all {len(games)} games in parallel batches...")
     
     streams_by_game = {}
-    batch_size = 5  # Fetch 5 games at once
+    batch_size = 10
     
     for i in range(0, len(games), batch_size):
         batch = games[i:i+batch_size]
@@ -342,7 +345,6 @@ async def perform_analysis(limit=100):
         
         logger.info(f"Fetching streams: batch {batch_num}/{total_batches} ({len(batch)} games)...")
         
-        # Fetch all games in this batch concurrently
         async def fetch_game_streams(game):
             try:
                 streams = []
@@ -356,10 +358,8 @@ async def perform_analysis(limit=100):
                 logger.warning(f"Error fetching streams for {game.name}: {e}")
                 return None
         
-        # Fetch batch concurrently
         results = await asyncio.gather(*[fetch_game_streams(g) for g in batch], return_exceptions=True)
         
-        # Store results
         for result in results:
             if result and not isinstance(result, Exception):
                 game_id, data = result
@@ -367,11 +367,10 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Fetched stream data for {len(streams_by_game)} games")
     
-    # Close Twitch connection - we're done with API!
     await twitch.close()
-    logger.info("Closed Twitch connection - processing locally now (no timeouts, no rate limits!)")
+    logger.info("Closed Twitch connection - processing locally now")
     
-    # Now process each game locally (instant!)
+    # Process each game locally
     opportunities = []
     processed_count = 0
     skipped_count = 0
@@ -384,10 +383,8 @@ async def perform_analysis(limit=100):
             if not streams:
                 continue
             
-            # Sort streams by viewer count (descending)
             streams.sort(key=lambda x: x.viewer_count, reverse=True)
             
-            # Calculate metrics
             total_viewers = sum(s.viewer_count for s in streams)
             channel_count = len(streams)
             
@@ -407,16 +404,12 @@ async def perform_analysis(limit=100):
                 skipped_count += 1
                 continue
             
-            # Calculate all metrics
             avg_viewers_per_channel = total_viewers / channel_count
             
-            # DISCOVERABILITY (45% weight)
-            # Lower channel count = easier to discover (max benefit at <100 channels)
-            channel_penalty = min(channel_count / 500, 1.0)  # Penalty increases up to 500 channels
+            # Calculate scores
+            channel_penalty = min(channel_count / 500, 1.0)
             disc = max(0.3, 1.0 - channel_penalty)
             
-            # VIABILITY (35% weight)
-            # Sweet spot: 50-500 avg viewers per channel
             if avg_viewers_per_channel < 10:
                 viab = 0.3
             elif 10 <= avg_viewers_per_channel < 50:
@@ -428,8 +421,6 @@ async def perform_analysis(limit=100):
                 penalty = max(0.15 - (excess / 1000), 0.01)
                 viab = max(0.3, 0.8 - penalty)
             
-            # ENGAGEMENT (20% weight)
-            # Higher average viewers = more engaged community
             if avg_viewers_per_channel >= 100:
                 eng = 1.0
             elif avg_viewers_per_channel >= 50:
@@ -439,14 +430,11 @@ async def perform_analysis(limit=100):
             else:
                 eng = max(0.2, avg_viewers_per_channel / 50)
             
-            # Calculate overall score
             overall = (disc * 0.45) + (viab * 0.35) + (eng * 0.20)
             
-            # Get purchase links and box art
             purchase_links = get_purchase_links(game.name)
             box_art_url = game.box_art_url.format(width=285, height=380) if game.box_art_url else ""
             
-            # Create opportunity entry
             opportunities.append({
                 "game_name": game.name,
                 "game_id": game.id,
@@ -478,16 +466,81 @@ async def perform_analysis(limit=100):
     for idx, opp in enumerate(opportunities):
         opp["rank"] = idx + 1
     
+    duration = time.time() - start_time
+    
     # Create response
     response = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         "total_games_analyzed": len(opportunities),
         "top_opportunities": opportunities,
-        "cache_expires_in_seconds": _cache["expires_in"],
-        "next_update": datetime.fromtimestamp(time.time() + _cache["expires_in"]).isoformat() + "Z"
+        "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES,
+        "fetch_duration_seconds": round(duration, 2)
     }
     
-    return response
+    logger.info("=" * 60)
+    logger.info(f"BACKGROUND REFRESH: Complete in {duration:.1f}s")
+    logger.info(f"Total opportunities: {len(opportunities)}")
+    logger.info("=" * 60)
+    
+    return response, duration
+
+# ============================================================================
+# BACKGROUND WORKER
+# ============================================================================
+
+def background_refresh():
+    """
+    Called by scheduler every REFRESH_INTERVAL_MINUTES.
+    Fetches fresh data and updates the cache.
+    """
+    if _cache["is_refreshing"]:
+        logger.info("Refresh already in progress, skipping...")
+        return
+    
+    set_refresh_status(True)
+    
+    try:
+        # Run the async analysis
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            response, duration = loop.run_until_complete(perform_analysis())
+            set_cached_data(response, duration)
+            logger.info(f"Cache updated successfully (refresh #{_cache['refresh_count']})")
+        finally:
+            loop.close()
+            
+    except Exception as e:
+        logger.error(f"Background refresh failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        set_refresh_status(False, error=e)
+        return
+    
+    set_refresh_status(False)
+
+# Initialize scheduler
+scheduler = BackgroundScheduler()
+
+def start_background_worker():
+    """Start the background refresh scheduler"""
+    logger.info(f"Starting background worker (refresh every {REFRESH_INTERVAL_MINUTES} minutes)")
+    
+    # Schedule recurring refresh
+    scheduler.add_job(
+        background_refresh,
+        trigger=IntervalTrigger(minutes=REFRESH_INTERVAL_MINUTES),
+        id='twitch_refresh',
+        name='Refresh Twitch data',
+        replace_existing=True
+    )
+    
+    scheduler.start()
+    
+    # Do initial fetch immediately (in background thread)
+    logger.info("Triggering initial data fetch...")
+    threading.Thread(target=background_refresh, daemon=True).start()
 
 # ============================================================================
 # API ROUTES
@@ -498,106 +551,143 @@ def root():
     """Health check endpoint"""
     return jsonify({
         "status": "online",
-        "service": "Twitch Streaming Opportunity Analyzer",
-        "version": "2.0.0 - Web Edition",
+        "service": "StreamScout - Twitch Streaming Opportunity Analyzer",
+        "version": "3.0.0 - Background Worker Architecture",
+        "architecture": "Pre-computed cache, instant responses",
+        "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES,
         "endpoints": {
             "analysis": "/api/v1/analyze",
-            "health": "/api/v1/health"
+            "health": "/api/v1/health",
+            "status": "/api/v1/status"
         }
     })
 
 @app.route("/api/v1/health")
 def health():
     """Health check for monitoring"""
-    cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
+    with _cache_lock:
+        cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
+        
     return jsonify({
         "status": "healthy",
         "cache_active": _cache["data"] is not None,
-        "cache_age_seconds": cache_age,
+        "cache_age_seconds": int(cache_age) if cache_age else None,
+        "is_refreshing": _cache["is_refreshing"],
+        "refresh_count": _cache["refresh_count"],
+        "last_refresh_duration": _cache["last_refresh_duration"],
+        "last_error": _cache["last_error"],
+        "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    })
+
+@app.route("/api/v1/status")
+def status():
+    """Detailed status for debugging"""
+    with _cache_lock:
+        cache_age = time.time() - _cache["timestamp"] if _cache["data"] else None
+        next_refresh = max(0, (REFRESH_INTERVAL_MINUTES * 60) - cache_age) if cache_age else 0
+        
+    return jsonify({
+        "service": "StreamScout",
+        "version": "3.0.0",
+        "architecture": "background_worker",
+        "cache": {
+            "has_data": _cache["data"] is not None,
+            "age_seconds": int(cache_age) if cache_age else None,
+            "next_refresh_seconds": int(next_refresh),
+            "total_refreshes": _cache["refresh_count"],
+            "last_duration_seconds": _cache["last_refresh_duration"]
+        },
+        "worker": {
+            "is_refreshing": _cache["is_refreshing"],
+            "interval_minutes": REFRESH_INTERVAL_MINUTES,
+            "last_error": _cache["last_error"]
+        },
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     })
 
 @app.route("/api/v1/analyze")
 def analyze_opportunities():
     """
-    Analyze Twitch streaming opportunities
+    Get streaming opportunities - INSTANT from cache
     
     Query params:
-        limit: Number of top opportunities to return (default 100, max 100)
-        force_refresh: Force fresh data instead of using cache (default false)
+        limit: Number of top opportunities to return (default 100, max 200)
     
     Returns:
-        JSON with top streaming opportunities
+        JSON with top streaming opportunities (from pre-computed cache)
     """
     
-    # Get query parameters
     limit = request.args.get('limit', default=100, type=int)
-    force_refresh = request.args.get('force_refresh', default='false').lower() == 'true'
-    
-    # Validate limit (max 200 for bulk fetch version)
     limit = min(max(limit, 1), 200)
     
-    # Check cache first
-    if not force_refresh:
-        cached = get_cached_data()
-        if cached:
-            logger.info("Returning cached data")
-            cached["top_opportunities"] = cached["top_opportunities"][:limit]
-            return jsonify(cached)
+    # Get from cache (instant!)
+    cached = get_cached_data()
     
-    # Validate credentials
+    if cached is None:
+        # Cache not ready yet (server just started)
+        return jsonify({
+            "status": "warming_up",
+            "message": "StreamScout is fetching initial data. Please retry in 30-60 seconds.",
+            "is_refreshing": _cache["is_refreshing"],
+            "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        }), 202  # 202 Accepted - request received, processing
+    
+    # Return cached data with limit applied
+    cached["top_opportunities"] = cached["top_opportunities"][:limit]
+    return jsonify(cached)
+
+@app.route("/api/v1/force-refresh", methods=["POST"])
+def force_refresh():
+    """Force an immediate data refresh (admin use)"""
+    if _cache["is_refreshing"]:
+        return jsonify({
+            "status": "already_refreshing",
+            "message": "A refresh is already in progress"
+        }), 409
+    
+    # Trigger refresh in background
+    threading.Thread(target=background_refresh, daemon=True).start()
+    
+    return jsonify({
+        "status": "refresh_started",
+        "message": "Background refresh triggered"
+    })
+
+# ============================================================================
+# STARTUP - Works with both direct run AND gunicorn
+# ============================================================================
+
+# Track if scheduler has been started (prevent duplicates)
+_scheduler_started = False
+
+def initialize_app():
+    """Initialize the app - called once on startup"""
+    global _scheduler_started
+    
+    if _scheduler_started:
+        return
+    
+    # Check for credentials
     if not TWITCH_APP_ID or not TWITCH_APP_SECRET:
-        return jsonify({
-            "error": "Twitch API credentials not configured on server"
-        }), 500
+        logger.warning("WARNING: Twitch API credentials not found!")
+        logger.warning("   Set TWITCH_APP_ID and TWITCH_APP_SECRET environment variables")
+    else:
+        logger.info("Twitch API credentials loaded")
     
-    logger.info("Fetching fresh data from Twitch API...")
+    logger.info("=" * 60)
+    logger.info("STREAMSCOUT v3.0 - Background Worker Architecture")
+    logger.info("=" * 60)
+    logger.info(f"Refresh interval: {REFRESH_INTERVAL_MINUTES} minutes")
+    logger.info("User requests served from pre-computed cache (instant!)")
+    logger.info("=" * 60)
     
-    try:
-        # Run async analysis
-        response = asyncio.run(perform_analysis(limit))
-        
-        # Cache the results
-        set_cached_data(response)
-        
-        logger.info(f"Analysis complete. Returning top {limit} opportunities.")
-        
-        return jsonify(response)
-        
-    except asyncio.TimeoutError:
-        return jsonify({
-            "error": "Twitch API connection timeout - please try again"
-        }), 504
-    except Exception as e:
-        logger.error(f"Analysis error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({
-            "error": f"Analysis failed: {str(e)}"
-        }), 500
+    # Start background worker
+    start_background_worker()
+    _scheduler_started = True
 
-@app.route("/api/v1/clear-cache", methods=["POST"])
-def clear_cache():
-    """Clear the analysis cache (forces fresh data on next request)"""
-    _cache["data"] = None
-    _cache["timestamp"] = 0
-    return jsonify({"status": "cache cleared"})
-
-# ============================================================================
-# STARTUP
-# ============================================================================
+# Initialize when module is imported (works with gunicorn)
+initialize_app()
 
 if __name__ == "__main__":
-    # Check for credentials on startup
-    if not TWITCH_APP_ID or not TWITCH_APP_SECRET:
-        print("WARNING: Twitch API credentials not found!")
-        print("   Set TWITCH_APP_ID and TWITCH_APP_SECRET environment variables")
-    else:
-        print("Twitch API credentials loaded")
-    
-    print("\nStarting Twitch Opportunity Analyzer API (Web Edition)...")
-    print("API will be available at: http://localhost:5000")
-    print("Ready for Next.js frontend")
-    print("\n")
-    
+    # Direct run (for local testing)
     app.run(host="0.0.0.0", port=5000, debug=False)
