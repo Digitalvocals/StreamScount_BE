@@ -299,7 +299,7 @@ async def perform_analysis():
     try:
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
-            game_names = [g['name'] for g in game_data['games'][:300]]
+            game_names = [g['name'] for g in game_data['games'][:500]]
         logger.info(f"Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
@@ -641,7 +641,7 @@ def analyze_opportunities():
     """
     
     limit = request.args.get('limit', default=100, type=int)
-    limit = min(max(limit, 1), 200)
+    limit = min(max(limit, 1), 500)
     
     # Get from cache (instant!)
     cached = get_cached_data()
