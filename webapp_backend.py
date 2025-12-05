@@ -269,7 +269,10 @@ def get_trend_indicator(overall_score):
 # ============================================================================
 
 async def perform_analysis(limit=100):
-    """Perform the Twitch analysis asynchronously"""
+    """
+    Perform the Twitch analysis asynchronously
+    NEW APPROACH: Fetch all data first, process locally (no rate limits!)
+    """
     
     # Initialize Twitch API
     twitch = await asyncio.wait_for(
@@ -286,14 +289,14 @@ async def perform_analysis(limit=100):
     await asyncio.sleep(2.0)
     logger.info("DSWAF: Connection established")
     
-    # TEST: Load 200 games from JSON file
-    logger.info("TEST: Loading top 200 games from top_games.json...")
+    # Load 200 games from JSON file
+    logger.info("Loading top 200 games from top_games.json...")
     try:
         import json
         with open('top_games.json', 'r', encoding='utf-8') as f:
             game_data = json.load(f)
             game_names = [g['name'] for g in game_data['games'][:200]]
-        logger.info(f"TEST: Loaded {len(game_names)} games from file")
+        logger.info(f"Loaded {len(game_names)} games from file")
     except FileNotFoundError:
         logger.warning("top_games.json not found, falling back to API")
         game_names = []
@@ -302,7 +305,7 @@ async def perform_analysis(limit=100):
         logger.info(f"Fetched {len(game_names)} games from API as fallback")
     
     # Validate games in chunks
-    logger.info("TEST: Validating games with Twitch API...")
+    logger.info("Validating games with Twitch API...")
     games = []
     chunk_size = 100
     
@@ -311,77 +314,143 @@ async def perform_analysis(limit=100):
         chunk_num = (i // chunk_size) + 1
         total_chunks = (len(game_names) + chunk_size - 1) // chunk_size
         
-        logger.info(f"TEST: Validating chunk {chunk_num}/{total_chunks} ({len(chunk)} games)")
+        logger.info(f"Validating chunk {chunk_num}/{total_chunks} ({len(chunk)} games)")
         
         try:
             async for game in twitch.get_games(names=chunk):
                 games.append(game)
             
-            # Delay between chunks
             if i + chunk_size < len(game_names):
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
                 
         except Exception as e:
             logger.warning(f"Error validating chunk {chunk_num}: {e}")
             continue
     
-    logger.info(f"TEST: Validated {len(games)} active games from {len(game_names)} total")
+    logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # Analyze ALL validated games
-    games_to_analyze = games
-    logger.info(f"TEST: Will analyze {len(games_to_analyze)} games (filtering for <15k viewers)")
+    # Build game_id -> game object map
+    game_map = {game.id: game for game in games}
+    game_ids_we_care_about = set(game_map.keys())
     
-    # Process games in batches - balanced for speed and rate limits
+    # BULK FETCH: Get ALL streams at once!
+    logger.info("Fetching ALL stream data from Twitch in bulk...")
+    all_streams = []
+    fetch_rounds = 10  # Fetch up to 1000 streams (10 x 100)
+    
+    for fetch_round in range(fetch_rounds):
+        logger.info(f"Fetching stream batch {fetch_round + 1}/{fetch_rounds}...")
+        batch_streams = []
+        
+        async for stream in twitch.get_streams(first=100):
+            batch_streams.append(stream)
+        
+        if not batch_streams:
+            logger.info("No more streams available")
+            break
+        
+        all_streams.extend(batch_streams)
+        logger.info(f"Fetched {len(batch_streams)} streams, total: {len(all_streams)}")
+        
+        await asyncio.sleep(0.5)
+    
+    logger.info(f"Fetched {len(all_streams)} total streams from Twitch")
+    
+    # Close Twitch connection - we're done with API!
+    await twitch.close()
+    logger.info("Closed Twitch connection - processing locally now (no timeouts, no rate limits!)")
+    
+    # Group streams by game_id (only for games we care about)
+    streams_by_game = {}
+    for stream in all_streams:
+        if stream.game_id and stream.game_id in game_ids_we_care_about:
+            if stream.game_id not in streams_by_game:
+                streams_by_game[stream.game_id] = []
+            streams_by_game[stream.game_id].append(stream)
+    
+    logger.info(f"Grouped {len(all_streams)} streams into {len(streams_by_game)} games")
+    
+    # Process each game locally (lightning fast, no API calls!)
     opportunities = []
-    batch_size = 12  # Sweet spot: fast but avoids rate limits
+    processed_count = 0
+    skipped_count = 0
     
-    async def process_game(game):
-        """Process a single game and return opportunity data"""
+    for game_id, streams in streams_by_game.items():
+        game = game_map[game_id]
+        
         try:
-            # Get streams for this game
-            streams = []
-            async for stream in twitch.get_streams(game_id=game.id, first=100):
-                streams.append(stream)
-            
             if not streams:
-                return None
+                continue
+            
+            # Sort streams by viewer count (descending)
+            streams.sort(key=lambda x: x.viewer_count, reverse=True)
             
             # Calculate metrics
             total_viewers = sum(s.viewer_count for s in streams)
             channel_count = len(streams)
             
             if channel_count == 0 or total_viewers == 0:
-                return None
+                continue
             
-            # FILTER: Skip games with more than 15k viewers (too big for small streamers)
+            # FILTER: Skip games with >15k viewers
             if total_viewers > 15000:
-                logger.info(f"Skipping {game.name} - too many viewers ({total_viewers})")
-                return None
+                skipped_count += 1
+                continue
             
-            # FILTER: Skip games where one streamer dominates (70%+ of viewership)
-            if streams:
-                top_streamer_viewers = streams[0].viewer_count  # Streams are sorted by viewers
-                dominance_ratio = top_streamer_viewers / total_viewers if total_viewers > 0 else 0
-                
-                if dominance_ratio > 0.70:  # If top streamer has 70%+ of viewers
-                    logger.info(f"Skipping {game.name} - dominated by one streamer ({top_streamer_viewers}/{total_viewers} = {dominance_ratio:.1%})")
-                    return None
+            # FILTER: Skip games dominated by one streamer (70%+)
+            top_streamer_viewers = streams[0].viewer_count
+            dominance_ratio = top_streamer_viewers / total_viewers
             
-            # Calculate scores
-            disc, viab, eng, overall = calculate_all_scores(total_viewers, channel_count)
+            if dominance_ratio > 0.70:
+                skipped_count += 1
+                continue
             
-            # Get purchase links
+            # Calculate all metrics
+            avg_viewers_per_channel = total_viewers / channel_count
+            
+            # DISCOVERABILITY (45% weight)
+            # Lower channel count = easier to discover (max benefit at <100 channels)
+            channel_penalty = min(channel_count / 500, 1.0)  # Penalty increases up to 500 channels
+            disc = max(0.3, 1.0 - channel_penalty)
+            
+            # VIABILITY (35% weight)
+            # Sweet spot: 50-500 avg viewers per channel
+            if avg_viewers_per_channel < 10:
+                viab = 0.3
+            elif 10 <= avg_viewers_per_channel < 50:
+                viab = 0.5 + ((avg_viewers_per_channel - 10) / 40) * 0.3
+            elif 50 <= avg_viewers_per_channel <= 500:
+                viab = 0.8 + ((500 - avg_viewers_per_channel) / 450) * 0.2
+            else:
+                excess = avg_viewers_per_channel - 500
+                penalty = max(0.15 - (excess / 1000), 0.01)
+                viab = max(0.3, 0.8 - penalty)
+            
+            # ENGAGEMENT (20% weight)
+            # Higher average viewers = more engaged community
+            if avg_viewers_per_channel >= 100:
+                eng = 1.0
+            elif avg_viewers_per_channel >= 50:
+                eng = 0.6 + ((avg_viewers_per_channel - 50) / 50) * 0.4
+            elif avg_viewers_per_channel >= 20:
+                eng = 0.4 + ((avg_viewers_per_channel - 20) / 30) * 0.2
+            else:
+                eng = max(0.2, avg_viewers_per_channel / 50)
+            
+            # Calculate overall score
+            overall = (disc * 0.45) + (viab * 0.35) + (eng * 0.20)
+            
+            # Get purchase links and box art
             purchase_links = get_purchase_links(game.name)
+            box_art_url = game.box_art_url.format(width=285, height=380) if game.box_art_url else None
             
-            # Get box art URL
-            box_art_url = game.box_art_url.replace('{width}', '285').replace('{height}', '380') if game.box_art_url else None
-            
-            return {
-                "rank": 0,
-                "name": game.name,
-                "viewers": total_viewers,
+            # Create opportunity entry
+            opportunities.append({
+                "game_name": game.name,
+                "game_id": game.id,
+                "total_viewers": total_viewers,
                 "channels": channel_count,
-                "avg_viewers_per_channel": round(total_viewers / channel_count, 1),
+                "avg_viewers_per_channel": round(avg_viewers_per_channel, 1),
                 "discoverability_score": round(disc, 3),
                 "viability_score": round(viab, 3),
                 "engagement_score": round(eng, 3),
@@ -390,36 +459,15 @@ async def perform_analysis(limit=100):
                 "trend": get_trend_indicator(overall),
                 "purchase_links": purchase_links,
                 "box_art_url": box_art_url
-            }
+            })
+            
+            processed_count += 1
+            
         except Exception as e:
             logger.error(f"Error processing game {game.name}: {e}")
-            return None
+            continue
     
-    # Process in batches of 5
-    for i in range(0, len(games_to_analyze), batch_size):
-        batch = games_to_analyze[i:i+batch_size]
-        batch_num = (i // batch_size) + 1
-        total_batches = (len(games_to_analyze) + batch_size - 1) // batch_size
-        
-        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} games)")
-        
-        # Process batch concurrently
-        results = await asyncio.gather(*[process_game(game) for game in batch])
-        
-        # Add successful results
-        for result in results:
-            if result:
-                opportunities.append(result)
-        
-        # Small delay between batches
-        # TEST: Balanced delay to avoid rate limits
-        if i + batch_size < len(games_to_analyze):
-            await asyncio.sleep(1.2)  # Sweet spot for speed vs rate limits
-    
-    logger.info(f"Analysis complete. Processed {len(opportunities)} out of {len(games_to_analyze)} games")
-    
-    # Close Twitch connection
-    await twitch.close()
+    logger.info(f"Local processing complete! Processed {processed_count} games, skipped {skipped_count}")
     
     # Sort by overall score
     opportunities.sort(key=lambda x: x["overall_score"], reverse=True)
@@ -432,7 +480,7 @@ async def perform_analysis(limit=100):
     response = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         "total_games_analyzed": len(opportunities),
-        "top_opportunities": opportunities,  # Return ALL opportunities
+        "top_opportunities": opportunities,
         "cache_expires_in_seconds": _cache["expires_in"],
         "next_update": datetime.fromtimestamp(time.time() + _cache["expires_in"]).isoformat() + "Z"
     }
@@ -484,7 +532,7 @@ def analyze_opportunities():
     limit = request.args.get('limit', default=100, type=int)
     force_refresh = request.args.get('force_refresh', default='false').lower() == 'true'
     
-    # Validate limit (max 200 for test)
+    # Validate limit (max 200 for bulk fetch version)
     limit = min(max(limit, 1), 200)
     
     # Check cache first
