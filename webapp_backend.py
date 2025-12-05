@@ -329,50 +329,44 @@ async def perform_analysis(limit=100):
     
     logger.info(f"Validated {len(games)} active games from {len(game_names)} total")
     
-    # Build game_id -> game object map
-    game_map = {game.id: game for game in games}
-    game_ids_we_care_about = set(game_map.keys())
+    # NEW APPROACH: Fetch streams for EACH game first, then process locally
+    logger.info(f"Fetching stream data for all {len(games)} games (this may take 1-2 minutes)...")
     
-    # BULK FETCH: Get streams (limit to reasonable amount)
-    logger.info("Fetching stream data from Twitch in bulk...")
-    all_streams = []
-    max_streams = 1000  # Fetch up to 1000 streams total
+    streams_by_game = {}
     
-    stream_count = 0
-    async for stream in twitch.get_streams(first=100):
-        all_streams.append(stream)
-        stream_count += 1
+    for idx, game in enumerate(games):
+        if (idx + 1) % 20 == 0:
+            logger.info(f"Fetching streams: {idx + 1}/{len(games)} games...")
         
-        if stream_count >= max_streams:
-            break
+        try:
+            streams = []
+            async for stream in twitch.get_streams(game_id=game.id, first=100):
+                streams.append(stream)
+            
+            if streams:
+                streams_by_game[game.id] = {
+                    'game': game,
+                    'streams': streams
+                }
         
-        # Log progress every 100 streams
-        if stream_count % 100 == 0:
-            logger.info(f"Fetched {stream_count} streams...")
+        except Exception as e:
+            logger.warning(f"Error fetching streams for {game.name}: {e}")
+            continue
     
-    logger.info(f"Fetched {len(all_streams)} total streams from Twitch")
+    logger.info(f"Fetched stream data for {len(streams_by_game)} games")
     
     # Close Twitch connection - we're done with API!
     await twitch.close()
     logger.info("Closed Twitch connection - processing locally now (no timeouts, no rate limits!)")
     
-    # Group streams by game_id (only for games we care about)
-    streams_by_game = {}
-    for stream in all_streams:
-        if stream.game_id and stream.game_id in game_ids_we_care_about:
-            if stream.game_id not in streams_by_game:
-                streams_by_game[stream.game_id] = []
-            streams_by_game[stream.game_id].append(stream)
-    
-    logger.info(f"Grouped {len(all_streams)} streams into {len(streams_by_game)} games")
-    
-    # Process each game locally (lightning fast, no API calls!)
+    # Now process each game locally (instant!)
     opportunities = []
     processed_count = 0
     skipped_count = 0
     
-    for game_id, streams in streams_by_game.items():
-        game = game_map[game_id]
+    for game_id, data in streams_by_game.items():
+        game = data['game']
+        streams = data['streams']
         
         try:
             if not streams:
