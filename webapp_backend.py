@@ -69,10 +69,6 @@ REFRESH_INTERVAL_MINUTES = 10
 
 CACHE_FILE = '/tmp/streamscout_cache.json'
 STATUS_FILE = '/tmp/streamscout_status.json'
-GENRE_CACHE_FILE = '/tmp/streamscout_genres.json'
-
-# IGDB API endpoint
-IGDB_API_URL = "https://api.igdb.com/v4/games"
 
 _cache_lock = threading.Lock()
 
@@ -285,133 +281,67 @@ def calculate_engagement_score(viewers, channels):
     return engagement
 
 # ============================================================================
-# IGDB GENRE INTEGRATION
+# GENRE DATA FROM MASTER FILE
 # ============================================================================
 
-def load_genre_cache():
-    """Load cached genre mappings from file"""
+MASTER_GAMES_FILE = "master_games.json"
+_genre_lookup = None  # Cached lookup dict
+
+def load_genre_lookup():
+    """Load genre data from master_games.json into a lookup dict"""
+    global _genre_lookup
+    
+    if _genre_lookup is not None:
+        return _genre_lookup
+    
+    _genre_lookup = {}
+    
     try:
-        if os.path.exists(GENRE_CACHE_FILE):
-            with open(GENRE_CACHE_FILE, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.warning(f"Error loading genre cache: {e}")
-    return {}
-
-def save_genre_cache(cache):
-    """Save genre mappings to cache file"""
-    try:
-        with open(GENRE_CACHE_FILE, 'w') as f:
-            json.dump(cache, f)
-    except Exception as e:
-        logger.warning(f"Error saving genre cache: {e}")
-
-def get_igdb_access_token():
-    """Get OAuth token for IGDB API (uses same Twitch credentials)"""
-    try:
-        response = requests.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "client_id": TWITCH_APP_ID,
-                "client_secret": TWITCH_APP_SECRET,
-                "grant_type": "client_credentials"
-            }
-        )
-        if response.status_code == 200:
-            return response.json().get("access_token")
-    except Exception as e:
-        logger.error(f"Error getting IGDB token: {e}")
-    return None
-
-def fetch_genres_from_igdb(game_names, access_token):
-    """
-    Fetch genres for multiple games from IGDB API.
-    Returns dict of game_name -> list of genres
-    """
-    results = {}
-    
-    if not access_token:
-        logger.warning("No IGDB access token available")
-        return results
-    
-    headers = {
-        "Client-ID": TWITCH_APP_ID,
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json"
-    }
-    
-    # IGDB rate limit: 4 requests per second
-    # Process in small batches with delays
-    for game_name in game_names:
-        try:
-            # Search IGDB for this game
-            query = f'search "{game_name}"; fields name, genres.name; limit 1;'
-            
-            response = requests.post(
-                IGDB_API_URL,
-                headers=headers,
-                data=query
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data and len(data) > 0:
-                    game_data = data[0]
-                    genres = []
-                    if 'genres' in game_data:
-                        genres = [g['name'] for g in game_data['genres']]
-                    results[game_name] = genres
-            
-            # Small delay to respect rate limits
-            time.sleep(0.26)  # ~4 requests per second max
-            
-        except Exception as e:
-            logger.warning(f"Error fetching genre for {game_name}: {e}")
-            continue
-    
-    return results
-
-def get_genres_for_games(game_names):
-    """
-    Get genres for a list of games, using cache when available.
-    Only fetches from IGDB for games not in cache.
-    """
-    genre_cache = load_genre_cache()
-    results = {}
-    games_to_fetch = []
-    
-    # Check cache first
-    for name in game_names:
-        if name in genre_cache:
-            results[name] = genre_cache[name]
+        if os.path.exists(MASTER_GAMES_FILE):
+            with open(MASTER_GAMES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for game in data.get("games", []):
+                    # Index by both ID and name for flexible lookup
+                    game_id = game.get("id", "")
+                    game_name = game.get("name", "")
+                    genres = game.get("genres", ["Other"])
+                    
+                    if game_id:
+                        _genre_lookup[game_id] = genres
+                    if game_name:
+                        _genre_lookup[game_name] = genres
+                        _genre_lookup[game_name.lower()] = genres
+                
+                logger.info(f"Loaded genres for {len(data.get('games', []))} games from {MASTER_GAMES_FILE}")
         else:
-            games_to_fetch.append(name)
+            logger.warning(f"{MASTER_GAMES_FILE} not found - genres will be 'Other'")
+    except Exception as e:
+        logger.error(f"Error loading master games file: {e}")
     
-    # Fetch missing genres from IGDB
-    if games_to_fetch:
-        logger.info(f"Fetching genres for {len(games_to_fetch)} new games from IGDB...")
-        access_token = get_igdb_access_token()
-        
-        if access_token:
-            new_genres = fetch_genres_from_igdb(games_to_fetch, access_token)
-            results.update(new_genres)
-            
-            # Update cache
-            genre_cache.update(new_genres)
-            save_genre_cache(genre_cache)
-            
-            logger.info(f"Fetched genres for {len(new_genres)} games")
-    
-    return results
+    return _genre_lookup
 
-# Standard genre mapping for normalization
+def get_genres_for_game(game_id, game_name):
+    """Get genres for a single game by ID or name"""
+    lookup = load_genre_lookup()
+    
+    # Try ID first, then name, then lowercase name
+    if game_id in lookup:
+        return lookup[game_id]
+    if game_name in lookup:
+        return lookup[game_name]
+    if game_name.lower() in lookup:
+        return lookup[game_name.lower()]
+    
+    return ["Other"]
+
+# Standard genre list for filter endpoint
 GENRE_CATEGORIES = {
     "FPS": ["Shooter", "First person shooter"],
     "Battle Royale": ["Battle Royale"],
     "RPG": ["Role-playing (RPG)", "RPG", "MMORPG", "Action RPG", "Tactical RPG"],
     "MOBA": ["MOBA"],
     "Strategy": ["Strategy", "Real Time Strategy (RTS)", "Turn-based strategy (TBS)", "4X (explore, expand, exploit, and exterminate)", "Tactical"],
-    "Sports": ["Sport", "Sports", "Racing", "Bowling", "Golf", "Soccer", "Football", "Basketball", "Baseball"],
+    "Sports": ["Sport", "Sports", "Bowling", "Golf", "Soccer", "Football", "Basketball", "Baseball"],
     "Horror": ["Horror", "Survival Horror"],
     "Survival": ["Survival"],
     "Simulation": ["Simulator", "Simulation", "Life Simulation", "Vehicle Simulation"],
@@ -427,25 +357,6 @@ GENRE_CATEGORIES = {
     "Sandbox": ["Sandbox"],
     "Party": ["Party", "Trivia", "Quiz"],
 }
-
-def normalize_genres(raw_genres):
-    """Convert IGDB genres to our standardized categories"""
-    if not raw_genres:
-        return ["Other"]
-    
-    normalized = set()
-    for genre in raw_genres:
-        found = False
-        for category, matches in GENRE_CATEGORIES.items():
-            if genre in matches:
-                normalized.add(category)
-                found = True
-                break
-        if not found and genre:
-            # Keep original if no mapping found
-            normalized.add(genre)
-    
-    return list(normalized) if normalized else ["Other"]
 
 def get_recommendation(overall_score, channels):
     """Generate recommendation text based on score"""
@@ -582,11 +493,8 @@ async def perform_analysis():
     await twitch.close()
     logger.info("Closed Twitch connection - processing locally now")
     
-    # Fetch genres for all games
-    game_names_for_genres = [data['game'].name for data in streams_by_game.values() if data.get('game')]
-    logger.info(f"Fetching genres for {len(game_names_for_genres)} games...")
-    genre_map = get_genres_for_games(game_names_for_genres)
-    logger.info(f"Genre data available for {len(genre_map)} games")
+    # Load genre lookup from master_games.json (cached after first load)
+    load_genre_lookup()
     
     # Process each game locally
     opportunities = []
@@ -653,9 +561,8 @@ async def perform_analysis():
             purchase_links = get_purchase_links(game.name)
             box_art_url = game.box_art_url.format(width=285, height=380) if game.box_art_url else ""
             
-            # Get normalized genres for this game
-            raw_genres = genre_map.get(game.name, [])
-            genres = normalize_genres(raw_genres)
+            # Get genres from master file (already normalized)
+            genres = get_genres_for_game(game.id, game.name)
             
             opportunities.append({
                 "game_name": game.name,
